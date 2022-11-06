@@ -2109,14 +2109,10 @@ bool gpu_init(gpu_config* config) {
 
       VkMemoryPropertyFlags fallback = i == GPU_MEMORY_BUFFER_GPU ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : hostVisible;
 
+      bool found_fallback;
+
       for (uint32_t j = 0; j < memoryProperties.memoryTypeCount; j++) {
         if (~requirements.memoryTypeBits & (1 << j)) {
-          continue;
-        }
-
-        if ((memoryTypes[j].propertyFlags & fallback) == fallback) {
-          allocator->memoryFlags = memoryTypes[j].propertyFlags;
-          allocator->memoryType = j;
           continue;
         }
 
@@ -2124,6 +2120,13 @@ bool gpu_init(gpu_config* config) {
           allocator->memoryFlags = memoryTypes[j].propertyFlags;
           allocator->memoryType = j;
           break;
+        }
+
+        if (!found_fallback && (memoryTypes[j].propertyFlags & fallback) == fallback) {
+          allocator->memoryFlags = memoryTypes[j].propertyFlags;
+          allocator->memoryType = j;
+          found_fallback = true;
+          continue;
         }
       }
     }
