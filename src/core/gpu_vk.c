@@ -2126,6 +2126,7 @@ bool gpu_init(gpu_config* config) {
           allocator->memoryFlags = memoryTypes[j].propertyFlags;
           allocator->memoryType = j;
           found_fallback = true;
+          break;
           continue;
         }
       }

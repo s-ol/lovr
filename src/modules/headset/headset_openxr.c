@@ -89,10 +89,14 @@ uintptr_t gpu_vk_get_queue(uint32_t* queueFamilyIndex, uint32_t* queueIndex);
   X(xrDestroyHandTrackerEXT)\
   X(xrLocateHandJointsEXT)\
   X(xrGetHandMeshFB)\
-  X(xrGetDisplayRefreshRateFB) \
-  X(xrEnumerateDisplayRefreshRatesFB) \
-  X(xrRequestDisplayRefreshRateFB) \
-  X(xrQuerySystemTrackedKeyboardFB) \
+  X(xrGetControllerModelKeyMSFT)\
+  X(xrLoadControllerModelMSFT)\
+  X(xrGetControllerModelPropertiesMSFT)\
+  X(xrGetControllerModelStateMSFT)\
+  X(xrGetDisplayRefreshRateFB)\
+  X(xrEnumerateDisplayRefreshRatesFB)\
+  X(xrRequestDisplayRefreshRateFB)\
+  X(xrQuerySystemTrackedKeyboardFB)\
   X(xrCreateKeyboardSpaceFB)
 
 #define XR_DECLARE(fn) static PFN_##fn fn;
@@ -168,12 +172,14 @@ static struct {
   XrAction actions[MAX_ACTIONS];
   XrPath actionFilters[MAX_DEVICES];
   XrHandTrackerEXT handTrackers[2];
+  XrControllerModelKeyMSFT controllerModelKeys[2];
   struct {
     bool depth;
     bool gaze;
     bool handTracking;
     bool handTrackingAim;
     bool handTrackingMesh;
+    bool controllerModel;
     bool keyboardTracking;
     bool overlay;
     bool refreshRate;
@@ -251,6 +257,30 @@ static XrHandTrackerEXT getHandTracker(Device device) {
   }
 
   return *tracker;
+}
+
+// Controller model keys are created lazily because the runtime is allowed to
+// return XR_NULL_CONTROLLER_MODEL_KEY_MSFT until it is ready.
+static XrControllerModelKeyMSFT getControllerModelKey(Device device) {
+  if (!state.features.controllerModel || (device != DEVICE_HAND_LEFT && device != DEVICE_HAND_RIGHT)) {
+    return XR_NULL_CONTROLLER_MODEL_KEY_MSFT;
+  }
+
+  XrControllerModelKeyMSFT* modelKey = &state.controllerModelKeys[device == DEVICE_HAND_RIGHT];
+
+  if (!*modelKey) {
+    XrControllerModelKeyStateMSFT modelKeyState = {
+      .type = XR_TYPE_CONTROLLER_MODEL_KEY_STATE_MSFT,
+    };
+
+    if (XR_FAILED(xrGetControllerModelKeyMSFT(state.session, state.actionFilters[device], &modelKeyState))) {
+      return XR_NULL_CONTROLLER_MODEL_KEY_MSFT;
+    }
+
+    *modelKey = modelKeyState.modelKey;
+  }
+
+  return *modelKey;
 }
 
 static void openxr_getVulkanPhysicalDevice(void* instance, uintptr_t physicalDevice) {
@@ -336,6 +366,7 @@ static bool openxr_init(HeadsetConfig* config) {
       { "XR_FB_display_refresh_rate", &state.features.refreshRate, true },
       { "XR_FB_hand_tracking_aim", &state.features.handTrackingAim, true },
       { "XR_FB_hand_tracking_mesh", &state.features.handTrackingMesh, true },
+      { "XR_MSFT_controller_model", &state.features.controllerModel, true },
       { "XR_EXTX_overlay", &state.features.overlay, config->overlay },
       { "XR_HTCX_vive_tracker_interaction", &state.features.viveTrackers, true },
       { "XR_FB_keyboard_tracking", &state.features.keyboardTracking, true }
@@ -792,6 +823,7 @@ static bool openxr_init(HeadsetConfig* config) {
   state.clipNear = .01f;
   state.clipFar = 0.f;
   state.frameState.type = XR_TYPE_FRAME_STATE;
+
   return true;
 }
 
@@ -1481,11 +1513,7 @@ static bool openxr_vibrate(Device device, float power, float duration, float fre
   return true;
 }
 
-static ModelData* openxr_newModelData(Device device, bool animated) {
-  if (!state.features.handTrackingMesh) {
-    return NULL;
-  }
-
+static ModelData* openxr_newModelDataFB(Device device, bool animated) {
   XrHandTrackerEXT tracker = getHandTracker(device);
 
   if (!tracker) {
@@ -1683,6 +1711,47 @@ static ModelData* openxr_newModelData(Device device, bool animated) {
   lovrModelDataFinalize(model);
 
   return model;
+}
+
+static ModelData* openxr_newModelDataMSFT(Device device, bool animated) {
+  XrControllerModelKeyMSFT modelKey = getControllerModelKey(device);
+
+  if (!modelKey) {
+    return NULL;
+  }
+
+  uint32_t size;
+  if (XR_FAILED(xrLoadControllerModelMSFT(state.session, modelKey, 0, &size, NULL))) {
+    return NULL;
+  }
+
+  unsigned char* modelData = malloc(size);
+  if (!modelData) return NULL;
+
+  if (XR_FAILED(xrLoadControllerModelMSFT(state.session, modelKey, size, &size, modelData))) {
+    free(modelData);
+    return NULL;
+  }
+
+  Blob* blob = lovrBlobCreate(modelData, size, "Controller Model Data");
+  ModelData* model = lovrModelDataCreate(blob, NULL); // @TODO: null not allowed here
+  lovrRelease(blob, lovrBlobDestroy);
+
+  return model;
+}
+
+static ModelData* openxr_newModelData(Device device, bool animated) {
+  ModelData* data = NULL;
+
+  if (data == NULL && state.features.handTrackingMesh) {
+    data = openxr_newModelDataFB(device, animated);
+  }
+
+  if (data == NULL && state.features.controllerModel) {
+    data = openxr_newModelDataMSFT(device, animated);
+  }
+
+  return data;
 }
 
 static bool openxr_animate(Device device, Model* model) {
